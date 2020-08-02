@@ -1,7 +1,8 @@
+use std::marker::PhantomData;
 use {
     cast::{i64, u64},
     serde::{
-        de::{self, Error as _},
+        de,
         ser::{
             self, Error as _, SerializeStruct as _, SerializeStructVariant as _,
             SerializeTuple as _, SerializeTupleStruct as _, SerializeTupleVariant as _,
@@ -120,7 +121,7 @@ pub enum Object<'a> {
 impl<'a> ser::Serialize for Object<'a> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
-        S: serde::Serializer,
+        S: ser::Serializer,
     {
         match self {
             Object::Bool(bool) => serializer.serialize_bool(*bool),
@@ -260,7 +261,7 @@ fn leak_str(str: &str) -> &'static str {
 impl<'de> de::Deserialize<'de> for Object<'de> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: de::Deserializer<'de>,
     {
         deserializer.deserialize_any(Visitor)
     }
@@ -327,30 +328,65 @@ impl<'de> de::Visitor<'de> for Visitor {
 
     fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: de::Deserializer<'de>,
     {
-        let _ = deserializer;
-        Err(de::Error::invalid_type(de::Unexpected::NewtypeStruct, &de))
+        //TODO: Test this. It's probably correct?
+        deserializer.deserialize_any(self)
     }
-    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+
+    fn visit_seq<A>(self, access: A) -> Result<Self::Value, A::Error>
     where
         A: de::SeqAccess<'de>,
     {
-        let _ = seq;
-        Err(de::Error::invalid_type(de::Unexpected::Seq, &de))
+        struct SeqAccessIterator<'de, Access, Element>(Access, PhantomData<&'de Element>);
+        impl<'de, Access: de::SeqAccess<'de>, Element: de::Deserialize<'de>> Iterator
+            for SeqAccessIterator<'de, Access, Element>
+        {
+            type Item = Result<Element, Access::Error>;
+            fn next(&mut self) -> Option<Self::Item> {
+                self.0.next_element().transpose()
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (self.0.size_hint().unwrap_or(0), None)
+            }
+        }
+
+        Ok(Object::Seq(
+            SeqAccessIterator(access, PhantomData).collect::<Result<_, _>>()?,
+        ))
     }
-    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+
+    fn visit_map<A>(self, access: A) -> Result<Self::Value, A::Error>
     where
         A: de::MapAccess<'de>,
     {
-        let _ = map;
-        Err(de::Error::invalid_type(de::Unexpected::Map, &de))
+        struct MapAccessIterator<'de, Access, Key, Value>(Access, PhantomData<&'de (Key, Value)>);
+        impl<
+                'de,
+                Access: de::MapAccess<'de>,
+                Key: de::Deserialize<'de>,
+                Value: de::Deserialize<'de>,
+            > Iterator for MapAccessIterator<'de, Access, Key, Value>
+        {
+            type Item = Result<(Key, Value), Access::Error>;
+            fn next(&mut self) -> Option<Self::Item> {
+                self.0.next_entry().transpose()
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (self.0.size_hint().unwrap_or(0), None)
+            }
+        }
+
+        Ok(Object::Map(
+            MapAccessIterator(access, PhantomData).collect::<Result<_, _>>()?,
+        ))
     }
+
     fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
     where
         A: de::EnumAccess<'de>,
     {
-        let _ = data.variant();
-        Err(de::Error::invalid_type(de::Unexpected::Enum, &de))
+        let _ = data;
+        Err(de::Error::invalid_type(de::Unexpected::Enum, &self))
     }
 }
