@@ -1,0 +1,13 @@
+[package]
+name = "serde-any"
+version = "0.1.0"
+authors = ["Tamme Schichler <tamme@schichler.dev>"]
+edition = "2018"
+public = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cast = { version = "0.2.3", features = ["x128"] }
+serde = "1.0.114"
+wyz = "0.2.0"
