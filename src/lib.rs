@@ -118,6 +118,124 @@ pub enum Object<'a> {
     },
 }
 
+impl<'a> Object<'a> {
+    pub fn into_owned(self) -> Object<'static> {
+        match self {
+            Object::Bool(bool) => Object::Bool(bool),
+
+            Object::I8(i8) => Object::I8(i8),
+            Object::I16(i16) => Object::I16(i16),
+            Object::I32(i32) => Object::I32(i32),
+            Object::I64(i64) => Object::I64(i64),
+            Object::I128(i128) => Object::I128(i128),
+
+            Object::U8(u8) => Object::U8(u8),
+            Object::U16(u16) => Object::U16(u16),
+            Object::U32(u32) => Object::U32(u32),
+            Object::U64(u64) => Object::U64(u64),
+            Object::U128(u128) => Object::U128(u128),
+
+            Object::F32(f32) => Object::F32(f32),
+            Object::F64(f64) => Object::F64(f64),
+
+            Object::Char(char) => Object::Char(char),
+
+            Object::String(string) => Object::String(string.into_owned().into()),
+
+            Object::ByteArray(bytes) => Object::ByteArray(bytes.into_owned().into()),
+
+            Object::Option(option) => Object::Option(option.map(|b| b.into_owned().into())),
+
+            Object::Unit => Object::Unit,
+
+            Object::UnitStruct { name } => Object::UnitStruct {
+                name: name.into_owned().into(),
+            },
+
+            Object::UnitVariant {
+                name,
+                variant_index,
+                variant,
+            } => Object::UnitVariant {
+                name: name.into_owned().into(),
+                variant_index,
+                variant: variant.into_owned().into(),
+            },
+
+            Object::NewtypeStruct { name, value } => Object::NewtypeStruct {
+                name: name.into_owned().into(),
+                value: value.into_owned().into(),
+            },
+            Object::NewtypeVariant {
+                name,
+                variant_index,
+                variant,
+                value,
+            } => Object::NewtypeVariant {
+                name: name.into_owned().into(),
+                variant_index,
+                variant: variant.into_owned().into(),
+                value: value.into_owned().into(),
+            },
+
+            Object::Seq(elements) => {
+                Object::Seq(elements.into_iter().map(Object::into_owned).collect())
+            }
+
+            Object::Tuple(fields) => {
+                Object::Seq(fields.into_iter().map(Object::into_owned).collect())
+            }
+
+            Object::TupleStruct { name, fields } => Object::TupleStruct {
+                name: name.into_owned().into(),
+                fields: fields.into_iter().map(Object::into_owned).collect(),
+            },
+
+            Object::TupleVariant {
+                name,
+                variant_index,
+                variant,
+                fields,
+            } => Object::TupleVariant {
+                name: name.into_owned().into(),
+                variant_index,
+                variant: variant.into_owned().into(),
+                fields: fields.into_iter().map(Object::into_owned).collect(),
+            },
+
+            Object::Map(fields) => Object::Map(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect(),
+            ),
+
+            Object::Struct { name, fields } => Object::Struct {
+                name: name.into_owned().into(),
+                fields: fields
+                    .into_iter()
+                    .map(|(k, v)| (k.into_owned().into(), v.into_owned()))
+                    .collect(),
+            },
+
+            Object::StructVariant {
+                name,
+                variant_index,
+                variant,
+                fields,
+            } => Object::StructVariant {
+                name: name.into_owned().into(),
+                variant_index,
+                variant: variant.into_owned().into(),
+                fields: fields
+                    .into_iter()
+                    .map(|(k, v)| (k.into_owned().into(), v.into_owned()))
+                    .collect(),
+            },
+        }
+    }
+}
+
 impl<'a> ser::Serialize for Object<'a> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
