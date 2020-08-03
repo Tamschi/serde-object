@@ -1,7 +1,7 @@
 #TODO: Rename this to serde-object.
 [package]
-name = "serde-any"
-version = "0.1.0"
+name = "serde-object"
+version = "0.0.0-dev"
 authors = ["Tamme Schichler <tamme@schichler.dev>"]
 edition = "2018"
 publish = false
