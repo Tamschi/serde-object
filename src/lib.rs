@@ -21,6 +21,7 @@ use {
 ///
 /// - `i128` is serialized as `i64`, and if that doesn't fit then an error is thrown.
 /// - `u128` is serialized as `u64`, and if that doesn't fit then an error is thrown.
+/// - There is no way for Deserializers to hint what kind of enum variant they have available, so an assistant must be provided to support deserialising them at all.
 ///
 /// # Leaks
 ///
@@ -150,13 +151,8 @@ impl<'a> Object<'a> {
                 name: name.into_owned().into(),
             },
 
-            Object::UnitVariant {
-                name,
-                variant_index,
-                variant,
-            } => Object::UnitVariant {
+            Object::UnitVariant { name, variant } => Object::UnitVariant {
                 name: name.into_owned().into(),
-                variant_index,
                 variant: variant.into_owned().into(),
             },
 
@@ -166,12 +162,10 @@ impl<'a> Object<'a> {
             },
             Object::NewtypeVariant {
                 name,
-                variant_index,
                 variant,
                 value,
             } => Object::NewtypeVariant {
                 name: name.into_owned().into(),
-                variant_index,
                 variant: variant.into_owned().into(),
                 value: value.into_owned().into(),
             },
@@ -191,14 +185,12 @@ impl<'a> Object<'a> {
 
             Object::TupleVariant {
                 name,
-                variant_index,
                 variant,
                 fields,
             } => Object::TupleVariant {
                 name: name.into_owned().into(),
-                variant_index,
                 variant: variant.into_owned().into(),
-                fields: fields.into_iter().map(Object::into_owned).collect(),
+                fields: fields.into_owned().into(),
             },
 
             Object::Map(fields) => Object::Map(
@@ -218,17 +210,12 @@ impl<'a> Object<'a> {
 
             Object::StructVariant {
                 name,
-                variant_index,
                 variant,
                 fields,
             } => Object::StructVariant {
                 name: name.into_owned().into(),
-                variant_index,
                 variant: variant.into_owned().into(),
-                fields: fields
-                    .into_iter()
-                    .map(|(k, v)| (k.into_owned().into(), v.into_owned()))
-                    .collect(),
+                fields: fields.into_owned().into(),
             },
         }
     }
