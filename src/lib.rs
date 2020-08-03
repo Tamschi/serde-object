@@ -1,12 +1,14 @@
 use std::marker::PhantomData;
 use {
-    cast::{i64, u64},
+    cast::{f64, i64, u64},
     serde::{
-        de,
+        de::{self, IntoDeserializer as _},
+        forward_to_deserialize_any,
         ser::{
             self, Error as _, SerializeStruct as _, SerializeStructVariant as _,
             SerializeTuple as _, SerializeTupleStruct as _, SerializeTupleVariant as _,
         },
+        serde_if_integer128,
     },
     std::borrow::Cow,
     wyz::pipe::Pipe as _,
@@ -448,8 +450,10 @@ impl<'de> de::Visitor<'de> for Visitor {
     where
         D: de::Deserializer<'de>,
     {
-        //TODO: Test this. It's probably correct?
-        deserializer.deserialize_any(self)
+        Ok(Object::NewtypeStruct {
+            name: "UNKNOWN".into(),
+            value: deserializer.deserialize_any(Self)?.into(),
+        })
     }
 
     fn visit_seq<A>(self, access: A) -> Result<Self::Value, A::Error>
@@ -504,7 +508,203 @@ impl<'de> de::Visitor<'de> for Visitor {
     where
         A: de::EnumAccess<'de>,
     {
-        let _ = data;
-        Err(de::Error::invalid_type(de::Unexpected::Enum, &self))
+        todo!("Enum values are not implemented yet.");
+    }
+}
+
+impl<'de> de::IntoDeserializer<'de> for Object<'de> {
+    type Deserializer = Self;
+    fn into_deserializer(self) -> Self::Deserializer {
+        self
+    }
+}
+
+impl<'de> de::Deserializer<'de> for Object<'de> {
+    type Error = de::value::Error;
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self {
+            Object::Bool(bool) => visitor.visit_bool(bool),
+
+            Object::I8(i8) => visitor.visit_i8(i8),
+            Object::I16(i16) => visitor.visit_i16(i16),
+            Object::I32(i32) => visitor.visit_i32(i32),
+            Object::I64(i64) => visitor.visit_i64(i64),
+            Object::I128(i128) => visitor.visit_i128(i128),
+
+            Object::U8(u8) => visitor.visit_u8(u8),
+            Object::U16(u16) => visitor.visit_u16(u16),
+            Object::U32(u32) => visitor.visit_u32(u32),
+            Object::U64(u64) => visitor.visit_u64(u64),
+            Object::U128(u128) => visitor.visit_u128(u128),
+
+            Object::F32(f32) => visitor.visit_f32(f32),
+            Object::F64(f64) => visitor.visit_f64(f64),
+
+            Object::Char(char) => visitor.visit_char(char),
+            Object::String(cow) => match cow {
+                Cow::Borrowed(str) => visitor.visit_borrowed_str(str),
+                Cow::Owned(string) => visitor.visit_string(string),
+            },
+
+            Object::ByteArray(cow) => match cow {
+                Cow::Borrowed(slice) => visitor.visit_borrowed_bytes(slice),
+                Cow::Owned(vec) => visitor.visit_byte_buf(vec),
+            },
+
+            Object::Option(option) => match option {
+                Some(b) => visitor.visit_some(*b),
+                None => visitor.visit_none(),
+            },
+
+            Object::Unit => visitor.visit_unit(),
+
+            Object::UnitStruct { name } => visitor.visit_unit(),
+            self_ @ Object::UnitVariant { .. } => visitor.visit_enum(self_),
+            Object::NewtypeStruct { name: _, value } => visitor.visit_newtype_struct(*value),
+            self_ @ Object::NewtypeVariant { .. } => visitor.visit_enum(self_),
+            Object::Seq(elements) => visitor.visit_seq(elements.into_deserializer()),
+            Object::Tuple(fields) => visitor.visit_seq(fields.into_deserializer()),
+            Object::TupleStruct { name, fields } => todo!(),
+            self_ @ Object::TupleVariant { .. } => visitor.visit_enum(self_),
+            Object::Map(map) => todo!(),
+            Object::Struct { name, fields } => todo!(),
+            self_ @ Object::StructVariant { .. } => visitor.visit_enum(self_),
+        }
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+
+    serde_if_integer128!(forward_to_deserialize_any! {
+        i128 u128
+    });
+}
+
+impl<'de> Object<'de> {
+    fn unexp(&self) -> de::Unexpected {
+        match self {
+            Object::Bool(bool) => de::Unexpected::Bool(*bool),
+
+            Object::I8(i8) => de::Unexpected::Signed(i64(*i8)),
+            Object::I16(i16) => de::Unexpected::Signed(i64(*i16)),
+            Object::I32(i32) => de::Unexpected::Signed(i64(*i32)),
+            Object::I64(i64) => de::Unexpected::Signed(*i64),
+            Object::I128(i128) => i64(*i128)
+                .map(de::Unexpected::Signed)
+                .unwrap_or_else(|_| de::Unexpected::Other("i128")),
+
+            Object::U8(u8) => de::Unexpected::Unsigned(u64(*u8)),
+            Object::U16(u16) => de::Unexpected::Unsigned(u64(*u16)),
+            Object::U32(u32) => de::Unexpected::Unsigned(u64(*u32)),
+            Object::U64(u64) => de::Unexpected::Unsigned(*u64),
+            Object::U128(u128) => u64(*u128)
+                .map(de::Unexpected::Unsigned)
+                .unwrap_or_else(|_| de::Unexpected::Other("u128")),
+
+            Object::F32(f32) => de::Unexpected::Float(f64(*f32)),
+            Object::F64(f64) => de::Unexpected::Float(*f64),
+            Object::Char(char) => de::Unexpected::Char(*char),
+            Object::String(cow) => de::Unexpected::Str(cow),
+            Object::ByteArray(cow) => de::Unexpected::Bytes(cow),
+            Object::Option(_) => de::Unexpected::Option,
+            Object::Unit => de::Unexpected::Unit,
+            Object::UnitStruct { name } => de::Unexpected::Other("unit struct"),
+            Object::UnitVariant {
+                name,
+                variant_index,
+                variant,
+            } => de::Unexpected::UnitVariant,
+            Object::NewtypeStruct { name, value } => de::Unexpected::NewtypeStruct,
+            Object::NewtypeVariant {
+                name,
+                variant_index,
+                variant,
+                value,
+            } => de::Unexpected::NewtypeVariant,
+            Object::Seq(_) => de::Unexpected::Seq,
+            Object::Tuple(_) => de::Unexpected::Other("tuple"),
+            Object::TupleStruct { name, fields } => de::Unexpected::Other("tuple struct"),
+            Object::TupleVariant {
+                name,
+                variant_index,
+                variant,
+                fields,
+            } => de::Unexpected::TupleVariant,
+            Object::Map(_) => de::Unexpected::Map,
+            Object::Struct { name, fields } => de::Unexpected::Other("struct"),
+            Object::StructVariant {
+                name,
+                variant_index,
+                variant,
+                fields,
+            } => de::Unexpected::StructVariant,
+        }
+    }
+}
+
+impl<'de> de::EnumAccess<'de> for Object<'de> {
+    type Error = <Self as de::Deserializer<'de>>::Error;
+    type Variant = Self;
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+    where
+        V: de::DeserializeSeed<'de>,
+    {
+        match self {
+            Object::UnitVariant { variant, .. }
+            | Object::NewtypeVariant { variant, .. }
+            | Object::TupleVariant { variant, .. }
+            | Object::StructVariant { variant, .. } => Ok((todo!(), self)),
+            _ => Err(de::Error::invalid_type(
+                de::Unexpected::Other("non-variant Object"),
+                &"enum variant",
+            )),
+        }
+    }
+}
+
+impl<'de> de::VariantAccess<'de> for Object<'de> {
+    type Error = <Self as de::EnumAccess<'de>>::Error;
+    fn unit_variant(self) -> Result<(), Self::Error> {
+        match self {
+            Object::UnitVariant { .. } => Ok(()),
+            _ => Err(de::Error::invalid_type(self.unexp(), &"unit variant")),
+        }
+    }
+    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
+    where
+        T: de::DeserializeSeed<'de>,
+    {
+        match self {
+            Object::NewtypeVariant { value, .. } => seed.deserialize(*value),
+            _ => Err(de::Error::invalid_type(self.unexp(), &"newtype variant")),
+        }
+    }
+    fn tuple_variant<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self {
+            Object::TupleVariant { fields, .. } => visitor.visit_seq(fields.into_deserializer()),
+            _ => Err(de::Error::invalid_type(self.unexp(), &"tuple variant")),
+        }
+    }
+    fn struct_variant<V>(
+        self,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self {
+            Object::StructVariant { fields, .. } => todo!(),
+            _ => Err(de::Error::invalid_type(self.unexp(), &"struct variant")),
+        }
     }
 }
