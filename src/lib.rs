@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use {
     cast::{f64, i64, u64},
     serde::{
-        de::{self, IntoDeserializer as _},
+        de::{self, Deserializer as _, IntoDeserializer as _, VariantAccess as _},
         forward_to_deserialize_any,
         ser::{
             self, Error as _, SerializeStruct as _, SerializeStructVariant as _,
@@ -67,8 +67,7 @@ pub enum Object<'a> {
 
     UnitVariant {
         name: Cow<'a, str>,
-        variant_index: u32,
-        variant: Cow<'a, str>,
+        variant: Box<Object<'a>>,
     },
 
     NewtypeStruct {
@@ -78,8 +77,7 @@ pub enum Object<'a> {
 
     NewtypeVariant {
         name: Cow<'a, str>,
-        variant_index: u32,
-        variant: Cow<'a, str>,
+        variant: Box<Object<'a>>,
         value: Box<Object<'a>>,
     },
 
@@ -94,9 +92,8 @@ pub enum Object<'a> {
 
     TupleVariant {
         name: Cow<'a, str>,
-        variant_index: u32,
-        variant: Cow<'a, str>,
-        fields: Vec<Object<'a>>,
+        variant: Box<Object<'a>>,
+        fields: Box<Object<'a>>,
     },
 
     /// This variant does not care whether keys are duplicated.  
@@ -114,9 +111,8 @@ pub enum Object<'a> {
     /// Formats may have a problem with it.
     StructVariant {
         name: Cow<'a, str>,
-        variant_index: u32,
-        variant: Cow<'a, str>,
-        fields: Vec<(Cow<'a, str>, Object<'a>)>,
+        variant: Box<Object<'a>>,
+        fields: Box<Object<'a>>,
     },
 }
 
@@ -353,18 +349,73 @@ impl<'a> ser::Serialize for Object<'a> {
 
             Object::StructVariant {
                 name,
-                variant_index,
                 variant,
                 fields,
             } => {
                 let mut serializer = serializer.serialize_struct_variant(
                     leak_str(name),
-                    *variant_index,
-                    leak_str(variant),
-                    fields.len(),
+                    match Box::as_ref(variant) {
+                        Object::U8(u8) => *u8 as u32,
+                        Object::U16(u16) => *u16 as u32,
+                        Object::U32(u32) => *u32,
+                        _ => u32::MAX,
+                    },
+                    leak_str(
+                        match Box::as_ref(variant) {
+                            Object::Bool(bool) => bool.to_string(),
+                            Object::I8(i8) => i8.to_string(),
+                            Object::I16(i16) => i16.to_string(),
+                            Object::I32(i32) => i32.to_string(),
+                            Object::I64(i64) => i64.to_string(),
+                            Object::I128(i128) => i128.to_string(),
+                            Object::U8(u8) => u8.to_string(),
+                            Object::U16(u16) => u16.to_string(),
+                            Object::U32(u32) => u32.to_string(),
+                            Object::U64(u64) => u64.to_string(),
+                            Object::U128(u128) => u128.to_string(),
+                            Object::F32(f32) => f32.to_string(),
+                            Object::F64(f64) => f64.to_string(),
+                            Object::Char(char) => char.to_string(),
+                            Object::String(cow) => cow.to_string(),
+                            Object::ByteArray(cow) => String::from_utf8_lossy(cow).to_string(),
+                            _ => return Err(ser::Error::custom(
+                                "Tried to serialise a struct variant, but couldn't make a name.",
+                            )),
+                        }
+                        .as_ref(),
+                    ),
+                    match Box::as_ref(fields) {
+                        Object::String(cow) => cow.as_ref().len(),
+                        Object::ByteArray(cow) => cow.as_ref().len(),
+                        Object::Seq(vec) | Object::Tuple(vec) => vec.len(),
+                        Object::Map(vec) => vec.len(),
+                        _ => return Err(ser::Error::custom("Tried to serialise a struct variant, but couldn't figure out the field count."))
+                    },
                 )?;
-                for (key, value) in fields {
-                    serializer.serialize_field(leak_str(key), value)?
+
+                match Box::as_ref(fields) {
+                    Object::String(cow) => {
+                        for (key, value) in cow.chars().enumerate() {
+                            serializer
+                                .serialize_field(leak_str(key.to_string().as_ref()), &value)?
+                        }
+                    }
+                    Object::ByteArray(cow) => {
+                        for (key, value) in cow.iter().enumerate() {
+                            serializer.serialize_field(leak_str(key.to_string().as_ref()), value)?
+                        }
+                    }
+                    Object::Seq(vec) | Object::Tuple(vec) => {
+                        for (key, value) in vec.iter().enumerate() {
+                            serializer.serialize_field(leak_str(key.to_string().as_ref()), value)?
+                        }
+                    }
+                    Object::Map(vec) => {
+                        for (key, value) in vec.iter().enumerate() {
+                            serializer.serialize_field(leak_str(key.to_string().as_ref()), value)?
+                        }
+                    }
+                    _ => unreachable!(),
                 }
                 serializer.end()
             }
@@ -383,17 +434,18 @@ impl<'de> de::Deserialize<'de> for Object<'de> {
     where
         D: de::Deserializer<'de>,
     {
-        deserializer.deserialize_any(Visitor)
+        deserializer.deserialize_any(Visitor(NoEnumAssistant))
     }
 }
 
 macro_rules! visit {
-    ($($visit_:ident($($ty:ty$( | $($expr:expr$(, $question_mark:tt)*);+$(;)?)?)?) => $variant:ident$(($const:expr))? $(/ ::$Error:ident where T: $t_path:path)?),*$(,)?) => {
+    ($($visit_:ident$(+ $self:ident)?($($ty:ty$( | $($expr:expr$(, $question_mark:tt)*);+$(;)?)?)?) => $variant:ident$(($const:expr))? $(/ ::$Error:ident where T: $t_path:path)?),*$(,)?) => {
         $(
             fn $visit_<T>(self$(, v: $ty)?) -> Result<Self::Value, T$(::$Error)?>
             where
                 T: $($t_path, T::Error: )?de::Error,
             {
+                $(let $self = self;)?
                 Ok(Object::$variant
                     // Alternatives:
                     $(({let _: $ty; v$($(.pipe($expr)$($question_mark)*)+)?.into()}))?
@@ -404,8 +456,9 @@ macro_rules! visit {
     };
 }
 
-struct Visitor;
-impl<'de> de::Visitor<'de> for Visitor {
+#[derive(Clone)]
+struct Visitor<Assistant: EnumAssistant + Clone>(Assistant);
+impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assistant> {
     type Value = Object<'de>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -441,7 +494,7 @@ impl<'de> de::Visitor<'de> for Visitor {
         visit_byte_buf(Vec<u8>) => ByteArray,
 
         visit_none() => Option(None),
-        visit_some(T | |d| d.deserialize_any(Self), ?; Box::new) => Option / ::Error where T: de::Deserializer<'de>,
+        visit_some + self_(T | |d| d.deserialize_any(self_), ?; Box::new) => Option / ::Error where T: de::Deserializer<'de>,
 
         visit_unit() => Unit,
     }
@@ -452,7 +505,7 @@ impl<'de> de::Visitor<'de> for Visitor {
     {
         Ok(Object::NewtypeStruct {
             name: "UNKNOWN".into(),
-            value: deserializer.deserialize_any(Self)?.into(),
+            value: deserializer.deserialize_any(self)?.into(),
         })
     }
 
@@ -508,7 +561,51 @@ impl<'de> de::Visitor<'de> for Visitor {
     where
         A: de::EnumAccess<'de>,
     {
-        todo!("Enum values are not implemented yet.");
+        // (Likely!) Goes through deserialize_identifier => deserialize_any, but we'll probably get a string, number (u64) or bytes.
+        let (variant, variant_access): (Object<'de>, _) = data.variant()?;
+
+        let name = Cow::Borrowed("UNKNOWN_ENUM");
+        let variant = Box::new(variant);
+        // So this is hacky...
+        // Essentially, we have no way of knowing what kind of variant is coming up, so we need a little more info.
+        // (We can't do this by trial and error even in a self-describing format since the A::Variant is consumed each time.)
+        match self.0.variant_hint(&variant)? {
+            VariantKind::Unit => variant_access
+                .unit_variant()
+                .map(|()| Object::UnitVariant { name, variant }),
+            VariantKind::Newtype => {
+                variant_access
+                    .newtype_variant()
+                    .map(|value| Object::NewtypeVariant {
+                        name,
+                        variant,
+                        value,
+                    })
+            }
+            VariantKind::Tuple(len) => {
+                variant_access
+                    .tuple_variant(len, self)
+                    .map(|fields| Object::TupleVariant {
+                        name,
+                        variant,
+                        fields: Box::new(fields),
+                    })
+            }
+            VariantKind::Struct(field_names) => variant_access
+                .struct_variant(
+                    field_names
+                        .into_iter()
+                        .map(|name| name.as_ref())
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                    self,
+                )
+                .map(|fields| Object::StructVariant {
+                    name,
+                    variant,
+                    fields: Box::new(fields),
+                }),
+        }
     }
 }
 
@@ -615,35 +712,16 @@ impl<'de> Object<'de> {
             Object::Option(_) => de::Unexpected::Option,
             Object::Unit => de::Unexpected::Unit,
             Object::UnitStruct { name } => de::Unexpected::Other("unit struct"),
-            Object::UnitVariant {
-                name,
-                variant_index,
-                variant,
-            } => de::Unexpected::UnitVariant,
+            Object::UnitVariant { .. } => de::Unexpected::UnitVariant,
             Object::NewtypeStruct { name, value } => de::Unexpected::NewtypeStruct,
-            Object::NewtypeVariant {
-                name,
-                variant_index,
-                variant,
-                value,
-            } => de::Unexpected::NewtypeVariant,
+            Object::NewtypeVariant { .. } => de::Unexpected::NewtypeVariant,
             Object::Seq(_) => de::Unexpected::Seq,
             Object::Tuple(_) => de::Unexpected::Other("tuple"),
             Object::TupleStruct { name, fields } => de::Unexpected::Other("tuple struct"),
-            Object::TupleVariant {
-                name,
-                variant_index,
-                variant,
-                fields,
-            } => de::Unexpected::TupleVariant,
+            Object::TupleVariant { .. } => de::Unexpected::TupleVariant,
             Object::Map(_) => de::Unexpected::Map,
             Object::Struct { name, fields } => de::Unexpected::Other("struct"),
-            Object::StructVariant {
-                name,
-                variant_index,
-                variant,
-                fields,
-            } => de::Unexpected::StructVariant,
+            Object::StructVariant { .. } => de::Unexpected::StructVariant,
         }
     }
 }
@@ -659,7 +737,7 @@ impl<'de> de::EnumAccess<'de> for Object<'de> {
             Object::UnitVariant { variant, .. }
             | Object::NewtypeVariant { variant, .. }
             | Object::TupleVariant { variant, .. }
-            | Object::StructVariant { variant, .. } => Ok((todo!(), self)),
+            | Object::StructVariant { variant, .. } => Ok((seed.deserialize(*variant)?, self)),
             _ => Err(de::Error::invalid_type(
                 de::Unexpected::Other("non-variant Object"),
                 &"enum variant",
@@ -690,7 +768,7 @@ impl<'de> de::VariantAccess<'de> for Object<'de> {
         V: de::Visitor<'de>,
     {
         match self {
-            Object::TupleVariant { fields, .. } => visitor.visit_seq(fields.into_deserializer()),
+            Object::TupleVariant { fields, .. } => fields.deserialize_any(visitor),
             _ => Err(de::Error::invalid_type(self.unexp(), &"tuple variant")),
         }
     }
@@ -703,8 +781,35 @@ impl<'de> de::VariantAccess<'de> for Object<'de> {
         V: de::Visitor<'de>,
     {
         match self {
-            Object::StructVariant { fields, .. } => todo!(),
+            Object::StructVariant { fields, .. } => fields.deserialize_any(visitor),
             _ => Err(de::Error::invalid_type(self.unexp(), &"struct variant")),
         }
+    }
+}
+
+pub enum VariantKind {
+    Unit,
+    Newtype,
+    Tuple(usize),
+    Struct(Vec<Cow<'static, str>>),
+}
+pub trait EnumAssistant {
+    fn variant_hint<E: de::Error>(&self, variant: &Object) -> Result<VariantKind, E>;
+}
+
+impl<T: EnumAssistant> EnumAssistant for &T {
+    #[inline(always)]
+    fn variant_hint<E: de::Error>(&self, variant: &Object) -> Result<VariantKind, E> {
+        <T as EnumAssistant>::variant_hint(self, variant)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NoEnumAssistant;
+impl EnumAssistant for NoEnumAssistant {
+    fn variant_hint<E: de::Error>(&self, variant: &Object) -> Result<VariantKind, E> {
+        Err(de::Error::custom(
+            "Encountered enum variant with no EnumAssistant specified.",
+        ))
     }
 }
