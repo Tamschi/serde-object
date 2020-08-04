@@ -1,5 +1,8 @@
-use std::marker::PhantomData;
+pub mod assistant;
+
+use std::any::Any;
 use {
+    assistant::{EnumAssistant, Seed, VariantKind},
     cast::{f64, i64, u64},
     serde::{
         de::{self, Deserializer as _, IntoDeserializer as _, VariantAccess as _},
@@ -10,12 +13,9 @@ use {
         },
         serde_if_integer128,
     },
-    std::borrow::Cow,
+    std::{borrow::Cow, marker::PhantomData},
     wyz::pipe::Pipe as _,
 };
-
-pub mod assistant;
-use assistant::{EnumAssistant, Seed, VariantKind};
 
 /// Represents a Serde data model value, losslessly.  
 /// See <https://serde.rs/data-model.html> for more information.
@@ -37,6 +37,7 @@ use assistant::{EnumAssistant, Seed, VariantKind};
 /// - a TupleStruct is serialized (for its name).
 /// - a TupleVariant is serialized (for its name and variant).
 /// - a Struct is serialized (for its name and each of its field keys).
+/// - a StructVariant is **deserialized** (for its field keys).
 pub enum Object<'a> {
     Bool(bool),
 
@@ -641,10 +642,16 @@ impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assista
 
         let name = Cow::Borrowed("UNKNOWN_ENUM");
         let variant = Box::new(variant);
+
         // So this is hacky...
         // Essentially, we have no way of knowing what kind of variant is coming up, so we need a little more info.
         // (We can't do this by trial and error even in a self-describing format since the A::Variant is consumed each time.)
-        match self.0.variant_hint(&variant)? {
+
+        // First, try to get a library-provided hint.
+        // Then, try a user-provided hint.
+        match assistant::extra::enum_variant_hint()
+            .map_or_else(|| self.0.variant_hint(&variant), Ok)?
+        {
             VariantKind::Unit => variant_access
                 .unit_variant()
                 .map(|()| Object::UnitVariant { name, variant }),

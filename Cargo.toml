@@ -12,4 +12,5 @@ publish = false
 cast = { version = "0.2.3", features = ["x128"] }
 lazy_static = "1.4.0"
 serde = "1.0.114"
+serde-object-assistant-extra = { path = "../serde-object-assistant-extra" }
 wyz = "0.2.0"

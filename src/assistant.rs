@@ -2,16 +2,14 @@ use {
     crate::{Object, Visitor},
     lazy_static::lazy_static,
     serde::de::{self, DeserializeSeed as _},
-    std::{any::Any, borrow::Cow, marker::PhantomData, sync::Mutex},
+    std::{any::Any, marker::PhantomData, sync::Mutex},
     wyz::Pipe as _,
 };
 
-pub enum VariantKind {
-    Unit,
-    Newtype,
-    Tuple(usize),
-    Struct(Cow<'static, [Cow<'static, str>]>),
-}
+pub(crate) use serde_object_assistant_extra as extra;
+
+//TODO: Show docs here if possible.
+pub use extra::VariantKind;
 
 pub trait EnumAssistant {
     fn variant_hint<E: de::Error>(&self, variant: &Object) -> Result<VariantKind, E>;
