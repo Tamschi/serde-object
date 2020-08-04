@@ -15,7 +15,7 @@ use {
 };
 
 pub mod assistant;
-use assistant::{EnumAssistant, VariantKind};
+use assistant::{EnumAssistant, Seed, VariantKind};
 
 /// Represents a Serde data model value, losslessly.  
 /// See <https://serde.rs/data-model.html> for more information.
@@ -485,14 +485,14 @@ fn leak_str(str: &str) -> &'static str {
     Box::leak(Box::new(str.to_string()))
 }
 
-// impl<'de> de::Deserialize<'de> for Object<'de> {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: de::Deserializer<'de>,
-//     {
-//         deserializer.deserialize_any(Visitor(NoEnumAssistant))
-//     }
-// }
+impl<'de> de::Deserialize<'de> for Object<'de> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(Visitor(NoEnumAssistant))
+    }
+}
 
 macro_rules! visit {
     ($($visit_:ident$(+ $self:ident)?($($ty:ty$( | $($expr:expr$(, $question_mark:tt)*);+$(;)?)?)?) => $variant:ident$(($const:expr))? $(/ ::$Error:ident where T: $t_path:path)?),*$(,)?) => {
@@ -569,21 +569,32 @@ impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assista
     where
         A: de::SeqAccess<'de>,
     {
-        struct SeqAccessIterator<'de, Access, Element>(Access, PhantomData<&'de Element>);
-        impl<'de, Access: de::SeqAccess<'de>, Element: de::Deserialize<'de>> Iterator
-            for SeqAccessIterator<'de, Access, Element>
+        struct SeqAccessIterator<'de, Assistant: EnumAssistant + Clone, Access: de::SeqAccess<'de>> {
+            assistant: Assistant,
+            access: Access,
+            marker: PhantomData<&'de ()>,
+        }
+        impl<'de, Assistant: EnumAssistant + Clone, Access: de::SeqAccess<'de>> Iterator
+            for SeqAccessIterator<'de, Assistant, Access>
         {
-            type Item = Result<Element, Access::Error>;
+            type Item = Result<Object<'de>, Access::Error>;
             fn next(&mut self) -> Option<Self::Item> {
-                self.0.next_element().transpose()
+                self.access
+                    .next_element_seed(Seed(self.assistant.clone()))
+                    .transpose()
             }
             fn size_hint(&self) -> (usize, Option<usize>) {
-                (self.0.size_hint().unwrap_or(0), None)
+                (self.access.size_hint().unwrap_or(0), None)
             }
         }
 
         Ok(Object::Seq(
-            SeqAccessIterator(access, PhantomData).collect::<Result<_, _>>()?,
+            SeqAccessIterator {
+                assistant: self.0,
+                access,
+                marker: PhantomData,
+            }
+            .collect::<Result<_, _>>()?,
         ))
     }
 
@@ -591,25 +602,32 @@ impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assista
     where
         A: de::MapAccess<'de>,
     {
-        struct MapAccessIterator<'de, Access, Key, Value>(Access, PhantomData<&'de (Key, Value)>);
-        impl<
-                'de,
-                Access: de::MapAccess<'de>,
-                Key: de::Deserialize<'de>,
-                Value: de::Deserialize<'de>,
-            > Iterator for MapAccessIterator<'de, Access, Key, Value>
+        struct MapAccessIterator<'de, Assistant: EnumAssistant + Clone, Access> {
+            assistant: Assistant,
+            access: Access,
+            marker: PhantomData<&'de ()>,
+        };
+        impl<'de, Assistant: EnumAssistant + Clone, Access: de::MapAccess<'de>> Iterator
+            for MapAccessIterator<'de, Assistant, Access>
         {
-            type Item = Result<(Key, Value), Access::Error>;
+            type Item = Result<(Object<'de>, Object<'de>), Access::Error>;
             fn next(&mut self) -> Option<Self::Item> {
-                self.0.next_entry().transpose()
+                self.access
+                    .next_entry_seed(Seed(self.assistant.clone()), Seed(self.assistant.clone()))
+                    .transpose()
             }
             fn size_hint(&self) -> (usize, Option<usize>) {
-                (self.0.size_hint().unwrap_or(0), None)
+                (self.access.size_hint().unwrap_or(0), None)
             }
         }
 
         Ok(Object::Map(
-            MapAccessIterator(access, PhantomData).collect::<Result<_, _>>()?,
+            MapAccessIterator {
+                assistant: self.0,
+                access,
+                marker: PhantomData,
+            }
+            .collect::<Result<_, _>>()?,
         ))
     }
 
@@ -618,7 +636,8 @@ impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assista
         A: de::EnumAccess<'de>,
     {
         // (Likely!) Goes through deserialize_identifier => deserialize_any, but we'll probably get a string, number (u64) or bytes.
-        let (variant, variant_access): (Object<'de>, _) = data.variant()?;
+        let (variant, variant_access): (Object<'de>, _) =
+            data.variant_seed(Seed(self.0.clone()))?;
 
         let name = Cow::Borrowed("UNKNOWN_ENUM");
         let variant = Box::new(variant);
@@ -631,11 +650,11 @@ impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assista
                 .map(|()| Object::UnitVariant { name, variant }),
             VariantKind::Newtype => {
                 variant_access
-                    .newtype_variant()
+                    .newtype_variant_seed(Seed(self.0))
                     .map(|value| Object::NewtypeVariant {
                         name,
                         variant,
-                        value,
+                        value: Box::new(value),
                     })
             }
             VariantKind::Tuple(len) => {
@@ -879,7 +898,7 @@ impl<'de> VariantAccess<'de> {
 #[derive(Debug, Clone, Copy)]
 struct NoEnumAssistant;
 impl EnumAssistant for NoEnumAssistant {
-    fn variant_hint<E: de::Error>(&self, variant: &Object) -> Result<VariantKind, E> {
+    fn variant_hint<E: de::Error>(&self, _variant: &Object) -> Result<VariantKind, E> {
         Err(de::Error::custom(
             "Encountered enum variant with no EnumAssistant specified.",
         ))
