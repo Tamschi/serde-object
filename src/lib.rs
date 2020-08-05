@@ -1,6 +1,5 @@
 pub mod assistant;
 
-use std::any::Any;
 use {
     assistant::{EnumAssistant, Seed, VariantKind},
     cast::{f64, i64, u64},
