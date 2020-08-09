@@ -8,12 +8,13 @@ use {
         de::{self, Deserializer as _, IntoDeserializer as _, VariantAccess as _},
         forward_to_deserialize_any,
         ser::{
-            self, Error as _, SerializeMap as _, SerializeStruct as _, SerializeStructVariant as _,
+            self, SerializeMap as _, SerializeStruct as _, SerializeStructVariant as _,
             SerializeTuple as _, SerializeTupleStruct as _, SerializeTupleVariant as _,
         },
         serde_if_integer128,
     },
     std::{borrow::Cow, marker::PhantomData},
+    try_match::try_match,
     wyz::pipe::Pipe as _,
 };
 
@@ -22,9 +23,8 @@ use {
 ///
 /// # Limitations
 ///
-/// - `i128` is serialized as `i64`, and if that doesn't fit then an error is thrown.
-/// - `u128` is serialized as `u64`, and if that doesn't fit then an error is thrown.
-/// - There is no way for Deserializers to hint what kind of enum variant they have available, so an assistant must be provided to support deserialising them at all.
+/// - There is no way for Deserializers to hint what kind of enum variant they have available, so an assistant must be provided to support deserialising them at all.  
+///   (Libraries can provide plug-in support here, which makes it possible to deserialize enum variants without specifying an assistant consumer-side.)
 ///
 /// # Leaks
 ///
@@ -261,17 +261,13 @@ impl<'a> ser::Serialize for Object<'a> {
             Object::I16(i16) => serializer.serialize_i16(*i16),
             Object::I32(i32) => serializer.serialize_i32(*i32),
             Object::I64(i64) => serializer.serialize_i64(*i64),
-            Object::I128(i128) => {
-                serializer.serialize_i64(i64(*i128).map_err(|error| S::Error::custom(&error))?)
-            }
+            Object::I128(i128) => serializer.serialize_i128(*i128),
 
             Object::U8(u8) => serializer.serialize_u8(*u8),
             Object::U16(u16) => serializer.serialize_u16(*u16),
             Object::U32(u32) => serializer.serialize_u32(*u32),
             Object::U64(u64) => serializer.serialize_u64(*u64),
-            Object::U128(u128) => {
-                serializer.serialize_u64(u64(*u128).map_err(|error| S::Error::custom(&error))?)
-            }
+            Object::U128(u128) => serializer.serialize_u128(*u128),
 
             Object::F32(f32) => serializer.serialize_f32(*f32),
             Object::F64(f64) => serializer.serialize_f64(*f64),
@@ -802,25 +798,43 @@ impl<'de> de::Deserializer<'de> for Object<'de> {
 
             Object::Unit => visitor.visit_unit(),
 
-            Object::UnitStruct { name } => visitor.visit_unit(),
+            Object::UnitStruct { .. } => visitor.visit_unit(),
             self_ @ Object::UnitVariant { .. } => visitor.visit_enum(self_),
             Object::NewtypeStruct { name: _, value } => visitor.visit_newtype_struct(*value),
             self_ @ Object::NewtypeVariant { .. } => visitor.visit_enum(self_),
             Object::Seq(elements) => visitor.visit_seq(elements.into_deserializer()),
             Object::Tuple(fields) => visitor.visit_seq(fields.into_deserializer()),
-            Object::TupleStruct { name, fields } => todo!(),
+            Object::TupleStruct { name: _, fields } => {
+                visitor.visit_seq(fields.into_deserializer())
+            }
             self_ @ Object::TupleVariant { .. } => visitor.visit_enum(self_),
-            Object::Map(map) => todo!(),
-            Object::Struct { name, fields } => todo!(),
+            Object::Map(map) => visitor.visit_map(MapAccess::new(map)),
+            Object::Struct { name: _, fields } => visitor.visit_map(MapAccess::new(
+                fields
+                    .into_iter()
+                    .filter_map(|(k, v)| v.map(|v| (Object::String(k), v))),
+            )),
             self_ @ Object::StructVariant { .. } => visitor.visit_enum(self_),
 
-            Object::DualVariantKey { index, name } => todo!(),
-            Object::FieldMap(fields) => todo!(),
+            self_ @ Object::DualVariantKey { .. } => {
+                let is_human_readable = self_.is_human_readable();
+                let (name, index) =
+                    try_match!(Object::DualVariantKey{ name, index } = self_ => (name, index))
+                        .unwrap();
+                if is_human_readable {
+                    visitor.visit_str(name.as_ref())
+                } else {
+                    visitor.visit_u32(index)
+                }
+            }
+            Object::FieldMap(fields) => visitor.visit_map(MapAccess::new(
+                fields.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))),
+            )),
         }
     }
 
     forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string
+        bool i8 i16 i32 i64 u8 u16 u64 f32 f64 char
         bytes byte_buf option unit unit_struct newtype_struct seq tuple
         tuple_struct map struct enum identifier ignored_any
     }
@@ -828,6 +842,107 @@ impl<'de> de::Deserializer<'de> for Object<'de> {
     serde_if_integer128!(forward_to_deserialize_any! {
         i128 u128
     });
+
+    fn is_human_readable(&self) -> bool {
+        true
+    }
+
+    fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self {
+            Object::DualVariantKey { index, .. } => visitor.visit_u32(index),
+            self_ => self_.deserialize_any(visitor),
+        }
+    }
+    fn deserialize_str<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self {
+            Object::DualVariantKey { name, .. } => visitor.visit_str(name.as_ref()),
+            self_ => self_.deserialize_any(visitor),
+        }
+    }
+    fn deserialize_string<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::Visitor<'de>,
+    {
+        match self {
+            Object::DualVariantKey { name, .. } => visitor.visit_string(name.to_string()),
+            self_ => self_.deserialize_any(visitor),
+        }
+    }
+}
+
+struct MapAccess<'de, I: Iterator<Item = (Object<'de>, Object<'de>)>> {
+    iter: I,
+    next_value: Option<Object<'de>>,
+}
+impl<'de, I: Iterator<Item = (Object<'de>, Object<'de>)>> MapAccess<'de, I> {
+    fn new(map: impl IntoIterator<Item = (Object<'de>, Object<'de>), IntoIter = I>) -> Self {
+        Self {
+            iter: map.into_iter(),
+            next_value: None,
+        }
+    }
+}
+impl<'de, I: Iterator<Item = (Object<'de>, Object<'de>)>> de::MapAccess<'de> for MapAccess<'de, I> {
+    type Error = de::value::Error;
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: de::DeserializeSeed<'de>,
+    {
+        self.iter
+            .next()
+            .map(|(k, v)| {
+                self.next_value = Some(v);
+                seed.deserialize(k)
+            })
+            .transpose()
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: de::DeserializeSeed<'de>,
+    {
+        seed.deserialize(
+            self.next_value
+                .take()
+                .expect("Called next_value_seed before next_key_seed."),
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn next_entry_seed<K, V>(
+        &mut self,
+        kseed: K,
+        vseed: V,
+    ) -> Result<Option<(K::Value, V::Value)>, Self::Error>
+    where
+        K: de::DeserializeSeed<'de>,
+        V: de::DeserializeSeed<'de>,
+    {
+        assert!(self.next_value.is_none());
+        self.iter
+            .next()
+            .map(|(k, v)| {
+                kseed
+                    .deserialize(k)
+                    .and_then(|key| vseed.deserialize(v).map(|value| (key, value)))
+            })
+            .transpose()
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        if let (min, Some(max)) = self.iter.size_hint() {
+            if min == max {
+                return Some(min);
+            }
+        }
+        None
+    }
 }
 
 impl<'de> Object<'de> {
@@ -858,19 +973,19 @@ impl<'de> Object<'de> {
             Object::ByteArray(cow) => de::Unexpected::Bytes(cow),
             Object::Option(_) => de::Unexpected::Option,
             Object::Unit => de::Unexpected::Unit,
-            Object::UnitStruct { name } => de::Unexpected::Other("unit struct"),
+            Object::UnitStruct { .. } => de::Unexpected::Other("unit struct"),
             Object::UnitVariant { .. } => de::Unexpected::UnitVariant,
-            Object::NewtypeStruct { name, value } => de::Unexpected::NewtypeStruct,
+            Object::NewtypeStruct { .. } => de::Unexpected::NewtypeStruct,
             Object::NewtypeVariant { .. } => de::Unexpected::NewtypeVariant,
             Object::Seq(_) => de::Unexpected::Seq,
             Object::Tuple(_) => de::Unexpected::Other("tuple"),
-            Object::TupleStruct { name, fields } => de::Unexpected::Other("tuple struct"),
+            Object::TupleStruct { .. } => de::Unexpected::Other("tuple struct"),
             Object::TupleVariant { .. } => de::Unexpected::TupleVariant,
             Object::Map(_) => de::Unexpected::Map,
-            Object::Struct { name, fields } => de::Unexpected::Other("struct"),
+            Object::Struct { .. } => de::Unexpected::Other("struct"),
             Object::StructVariant { .. } => de::Unexpected::StructVariant,
 
-            Object::DualVariantKey { index, name } => de::Unexpected::Other("dual variant key"),
+            Object::DualVariantKey { .. } => de::Unexpected::Other("dual variant key"),
             Object::FieldMap(_) => de::Unexpected::Map,
         }
     }

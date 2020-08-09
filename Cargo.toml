@@ -14,3 +14,4 @@ lazy_static = "1.4.0"
 serde = "1.0.114"
 serde-object-assistant-extra = { path = "../serde-object-assistant-extra" }
 wyz = "0.2.0"
+try_match = "0.2.2"
