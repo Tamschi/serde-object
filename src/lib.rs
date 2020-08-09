@@ -1,4 +1,5 @@
 pub mod assistant;
+pub mod serializer;
 
 use {
     assistant::{EnumAssistant, Seed, VariantKind},
@@ -7,7 +8,7 @@ use {
         de::{self, Deserializer as _, IntoDeserializer as _, VariantAccess as _},
         forward_to_deserialize_any,
         ser::{
-            self, Error as _, SerializeStruct as _, SerializeStructVariant as _,
+            self, Error as _, SerializeMap as _, SerializeStruct as _, SerializeStructVariant as _,
             SerializeTuple as _, SerializeTupleStruct as _, SerializeTupleVariant as _,
         },
         serde_if_integer128,
@@ -37,6 +38,7 @@ use {
 /// - a TupleVariant is serialized (for its name and variant).
 /// - a Struct is serialized (for its name and each of its field keys).
 /// - a StructVariant is **deserialized** (for its field keys).
+#[derive(Debug)]
 pub enum Object<'a> {
     Bool(bool),
 
@@ -108,7 +110,7 @@ pub enum Object<'a> {
     /// Formats may have a problem with it.
     Struct {
         name: Cow<'a, str>,
-        fields: Vec<(Cow<'a, str>, Object<'a>)>,
+        fields: Vec<(Cow<'a, str>, Option<Object<'a>>)>,
     },
 
     /// This variant may store duplicate fields.
@@ -118,6 +120,17 @@ pub enum Object<'a> {
         variant: Box<Object<'a>>,
         fields: Box<Object<'a>>,
     },
+
+    /// Created by [`Serializer`].  
+    /// Serialized as string or [`u32`] depending on the target [`ser::Serializer::is_human_readable()`].
+    DualVariantKey {
+        index: u32,
+        name: Cow<'a, str>,
+    },
+
+    /// Created by [`Serializer`] when serializing struct variants.  
+    /// Like [`Map`], but fields may be skipped.
+    FieldMap(Vec<(Object<'a>, Option<Object<'a>>)>),
 }
 
 impl<'a> Object<'a> {
@@ -207,7 +220,7 @@ impl<'a> Object<'a> {
                 name: name.into_owned().into(),
                 fields: fields
                     .into_iter()
-                    .map(|(k, v)| (k.into_owned().into(), v.into_owned()))
+                    .map(|(k, v)| (k.into_owned().into(), v.map(Object::into_owned)))
                     .collect(),
             },
 
@@ -220,6 +233,18 @@ impl<'a> Object<'a> {
                 variant: variant.into_owned().into(),
                 fields: fields.into_owned().into(),
             },
+
+            Object::DualVariantKey { index, name } => Object::DualVariantKey {
+                index,
+                name: name.into_owned().into(),
+            },
+
+            Object::FieldMap(fields) => Object::FieldMap(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (k.into_owned(), v.map(Object::into_owned)))
+                    .collect(),
+            ),
         }
     }
 }
@@ -350,12 +375,22 @@ impl<'a> ser::Serialize for Object<'a> {
                 serializer.end()
             }
 
-            Object::Map(pairs) => serializer.collect_map(pairs.iter().map(|(k, v)| (k, v))),
+            Object::Map(pairs) => {
+                let mut serialize_map = serializer.serialize_map(pairs.len().into())?;
+                for (k, v) in pairs {
+                    serialize_map.serialize_entry(k, v)?
+                }
+                serialize_map.end()
+            }
 
             Object::Struct { name, fields } => {
                 let mut serializer = serializer.serialize_struct(leak_str(name), fields.len())?;
                 for (key, value) in fields {
-                    serializer.serialize_field(leak_str(key), value)?
+                    if let Some(value) = value.as_ref() {
+                        serializer.serialize_field(leak_str(key), value)?
+                    } else {
+                        serializer.skip_field(leak_str(key))?
+                    }
                 }
                 serializer.end()
             }
@@ -374,6 +409,7 @@ impl<'a> ser::Serialize for Object<'a> {
                         Object::ByteArray(cow) => cow.as_ref().len(),
                         Object::Seq(vec) | Object::Tuple(vec) => vec.len(),
                         Object::Map(vec) => vec.len(),
+                        Object::FieldMap(vec) => vec.len(),
                         _ => return Err(ser::Error::custom("Tried to serialise a struct variant, but couldn't figure out the field count."))
                     },
                 )?;
@@ -400,9 +436,31 @@ impl<'a> ser::Serialize for Object<'a> {
                             serializer.serialize_field(make_field_key(key)?, value)?
                         }
                     }
+                    Object::FieldMap(vec) => {
+                        for (key, value) in vec.iter() {
+                            let key = make_field_key(key)?;
+                            if let Some(value) = value {
+                                serializer.serialize_field(key, value)?
+                            } else {
+                                serializer.skip_field(key)?
+                            }
+                        }
+                    }
                     _ => unreachable!(),
                 }
                 serializer.end()
+            }
+
+            Object::DualVariantKey { index, name } => {
+                if serializer.is_human_readable() {
+                    serializer.serialize_str(name)
+                } else {
+                    serializer.serialize_u32(*index)
+                }
+            }
+
+            Object::FieldMap(map) => {
+                serializer.collect_map(map.iter().filter_map(|(k, v)| v.as_ref().map(|v| (k, v))))
             }
         }
     }
@@ -468,6 +526,7 @@ fn make_field_key<E: ser::Error>(variant: &Object) -> Result<&'static str, E> {
             Object::Char(char) => char.to_string(),
             Object::String(cow) => cow.to_string(),
             Object::ByteArray(cow) => String::from_utf8_lossy(cow).to_string(),
+            Object::DualVariantKey { index: _, name } => name.to_string(),
             _ => {
                 return Err(ser::Error::custom(
                     "Tried to serialise a struct variant, but couldn't make a field key.",
@@ -754,6 +813,9 @@ impl<'de> de::Deserializer<'de> for Object<'de> {
             Object::Map(map) => todo!(),
             Object::Struct { name, fields } => todo!(),
             self_ @ Object::StructVariant { .. } => visitor.visit_enum(self_),
+
+            Object::DualVariantKey { index, name } => todo!(),
+            Object::FieldMap(fields) => todo!(),
         }
     }
 
@@ -807,6 +869,9 @@ impl<'de> Object<'de> {
             Object::Map(_) => de::Unexpected::Map,
             Object::Struct { name, fields } => de::Unexpected::Other("struct"),
             Object::StructVariant { .. } => de::Unexpected::StructVariant,
+
+            Object::DualVariantKey { index, name } => de::Unexpected::Other("dual variant key"),
+            Object::FieldMap(_) => de::Unexpected::Map,
         }
     }
 }
