@@ -3,7 +3,6 @@ pub mod serializer;
 
 use {
     assistant::{EnumAssistant, Seed, VariantKind},
-    cast::{f64, i64, u64},
     serde::{
         de::{self, Deserializer as _, IntoDeserializer as _, VariantAccess as _},
         forward_to_deserialize_any,
@@ -818,13 +817,11 @@ impl<'de> de::Deserializer<'de> for Object<'de> {
 
             self_ @ Object::DualVariantKey { .. } => {
                 let is_human_readable = self_.is_human_readable();
-                let (name, index) =
-                    try_match!(Object::DualVariantKey{ name, index } = self_ => (name, index))
-                        .unwrap();
+                let key = try_match!(Object::DualVariantKey { name, index } = self_).unwrap();
                 if is_human_readable {
-                    visitor.visit_str(name.as_ref())
+                    visitor.visit_str(key.name.as_ref())
                 } else {
-                    visitor.visit_u32(index)
+                    visitor.visit_u32(key.index)
                 }
             }
             Object::FieldMap(fields) => visitor.visit_map(MapAccess::new(
@@ -942,52 +939,6 @@ impl<'de, I: Iterator<Item = (Object<'de>, Object<'de>)>> de::MapAccess<'de> for
             }
         }
         None
-    }
-}
-
-impl<'de> Object<'de> {
-    fn unexp(&self) -> de::Unexpected {
-        match self {
-            Object::Bool(bool) => de::Unexpected::Bool(*bool),
-
-            Object::I8(i8) => de::Unexpected::Signed(i64(*i8)),
-            Object::I16(i16) => de::Unexpected::Signed(i64(*i16)),
-            Object::I32(i32) => de::Unexpected::Signed(i64(*i32)),
-            Object::I64(i64) => de::Unexpected::Signed(*i64),
-            Object::I128(i128) => i64(*i128)
-                .map(de::Unexpected::Signed)
-                .unwrap_or_else(|_| de::Unexpected::Other("i128")),
-
-            Object::U8(u8) => de::Unexpected::Unsigned(u64(*u8)),
-            Object::U16(u16) => de::Unexpected::Unsigned(u64(*u16)),
-            Object::U32(u32) => de::Unexpected::Unsigned(u64(*u32)),
-            Object::U64(u64) => de::Unexpected::Unsigned(*u64),
-            Object::U128(u128) => u64(*u128)
-                .map(de::Unexpected::Unsigned)
-                .unwrap_or_else(|_| de::Unexpected::Other("u128")),
-
-            Object::F32(f32) => de::Unexpected::Float(f64(*f32)),
-            Object::F64(f64) => de::Unexpected::Float(*f64),
-            Object::Char(char) => de::Unexpected::Char(*char),
-            Object::String(cow) => de::Unexpected::Str(cow),
-            Object::ByteArray(cow) => de::Unexpected::Bytes(cow),
-            Object::Option(_) => de::Unexpected::Option,
-            Object::Unit => de::Unexpected::Unit,
-            Object::UnitStruct { .. } => de::Unexpected::Other("unit struct"),
-            Object::UnitVariant { .. } => de::Unexpected::UnitVariant,
-            Object::NewtypeStruct { .. } => de::Unexpected::NewtypeStruct,
-            Object::NewtypeVariant { .. } => de::Unexpected::NewtypeVariant,
-            Object::Seq(_) => de::Unexpected::Seq,
-            Object::Tuple(_) => de::Unexpected::Other("tuple"),
-            Object::TupleStruct { .. } => de::Unexpected::Other("tuple struct"),
-            Object::TupleVariant { .. } => de::Unexpected::TupleVariant,
-            Object::Map(_) => de::Unexpected::Map,
-            Object::Struct { .. } => de::Unexpected::Other("struct"),
-            Object::StructVariant { .. } => de::Unexpected::StructVariant,
-
-            Object::DualVariantKey { .. } => de::Unexpected::Other("dual variant key"),
-            Object::FieldMap(_) => de::Unexpected::Map,
-        }
     }
 }
 
