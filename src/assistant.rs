@@ -1,15 +1,42 @@
+//! Side channels for providing more information than the Serde API lets through in-band.
+
 use {
     crate::{Object, Visitor},
     lazy_static::lazy_static,
     serde::de::{self, DeserializeSeed as _},
-    std::{any::Any, marker::PhantomData, sync::Mutex},
+    std::{any::Any, borrow::Cow, marker::PhantomData, sync::Mutex},
     wyz::Pipe as _,
 };
 
-pub(crate) use serde_object_assistant_extra as extra;
+#[cfg(feature = "assistant-extra")]
+pub mod extra {
+    use {super::VariantKind, linkme::distributed_slice};
 
-//TODO: Show docs here if possible.
-pub use extra::VariantKind;
+    /// Called between EnumAccess::variant_seed and one of VariantAccess's methods.
+    #[distributed_slice]
+    pub static ENUM_VARIANT_ASSISTS: [fn() -> Option<VariantKind>] = [..];
+
+    pub fn enum_variant_hint() -> Option<VariantKind> {
+        // If it were possible to get type-GUIDs for non-'static types, this would be doable a lot more nicely.
+        // Without that, we can't inspect the EnumAccess or VariantAccess involved safely, though.
+        // Unfortunately, the RFC for non-'static TypeIds was rejected (<https://github.com/rust-lang/rust/issues/41875>),
+        // so this is the best I can do.
+
+        for enum_variant_assist in ENUM_VARIANT_ASSISTS.iter() {
+            if let result @ Some(_) = enum_variant_assist() {
+                return result;
+            }
+        }
+        None
+    }
+}
+
+pub enum VariantKind {
+    Unit,
+    Newtype,
+    Tuple(usize),
+    Struct(Cow<'static, [Cow<'static, str>]>),
+}
 
 pub trait EnumAssistant {
     fn variant_hint<E: de::Error>(&self, variant: &Object) -> Result<VariantKind, E>;

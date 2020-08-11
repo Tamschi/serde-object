@@ -1,3 +1,5 @@
+//! Serializing directly into an [`Object<'static>`].
+
 use std::borrow::Cow;
 use {
     crate::Object,

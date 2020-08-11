@@ -22,7 +22,7 @@ use {
 ///
 /// # Limitations
 ///
-/// - There is no way for Deserializers to hint what kind of enum variant they have available, so an assistant must be provided to support deserialising them at all.  
+/// - There is no way for Deserializers to hint what kind of enum variant they have available, so an [assistant] must be provided to support deserialising them at all.  
 ///   (Libraries can provide plug-in support here, which makes it possible to deserialize enum variants without specifying an assistant consumer-side.)
 ///
 /// # Leaks
@@ -37,6 +37,8 @@ use {
 /// - a TupleVariant is serialized (for its name and variant).
 /// - a Struct is serialized (for its name and each of its field keys).
 /// - a StructVariant is **deserialized** (for its field keys).
+///
+/// TODO: Organise storage for these and add a way to clear it.
 #[derive(Debug)]
 pub enum Object<'a> {
     Bool(bool),
@@ -701,10 +703,13 @@ impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assista
         // (We can't do this by trial and error even in a self-describing format since the A::Variant is consumed each time.)
 
         // First, try to get a library-provided hint.
+        #[cfg(feature = "assistant-extra")]
+        let extra_hint = assistant::extra::enum_variant_hint();
+        #[cfg(not(feature = "assistant-extra"))]
+        let extra_hint = None;
+        
         // Then, try a user-provided hint.
-        match assistant::extra::enum_variant_hint()
-            .map_or_else(|| self.0.variant_hint(&variant), Ok)?
-        {
+        match extra_hint.map_or_else(|| self.0.variant_hint(&variant), Ok)? {
             VariantKind::Unit => variant_access
                 .unit_variant()
                 .map(|()| Object::UnitVariant { name, variant }),
@@ -798,22 +803,22 @@ impl<'de> de::Deserializer<'de> for Object<'de> {
             Object::Unit => visitor.visit_unit(),
 
             Object::UnitStruct { .. } => visitor.visit_unit(),
-            self_ @ Object::UnitVariant { .. } => visitor.visit_enum(self_),
+            self_ @ Object::UnitVariant { .. } => visitor.visit_enum(EnumAccess(self_)),
             Object::NewtypeStruct { name: _, value } => visitor.visit_newtype_struct(*value),
-            self_ @ Object::NewtypeVariant { .. } => visitor.visit_enum(self_),
+            self_ @ Object::NewtypeVariant { .. } => visitor.visit_enum(EnumAccess(self_)),
             Object::Seq(elements) => visitor.visit_seq(elements.into_deserializer()),
             Object::Tuple(fields) => visitor.visit_seq(fields.into_deserializer()),
             Object::TupleStruct { name: _, fields } => {
                 visitor.visit_seq(fields.into_deserializer())
             }
-            self_ @ Object::TupleVariant { .. } => visitor.visit_enum(self_),
+            self_ @ Object::TupleVariant { .. } => visitor.visit_enum(EnumAccess(self_)),
             Object::Map(map) => visitor.visit_map(MapAccess::new(map)),
             Object::Struct { name: _, fields } => visitor.visit_map(MapAccess::new(
                 fields
                     .into_iter()
                     .filter_map(|(k, v)| v.map(|v| (Object::String(k), v))),
             )),
-            self_ @ Object::StructVariant { .. } => visitor.visit_enum(self_),
+            self_ @ Object::StructVariant { .. } => visitor.visit_enum(EnumAccess(self_)),
 
             self_ @ Object::DualVariantKey { .. } => {
                 let is_human_readable = self_.is_human_readable();
@@ -841,6 +846,7 @@ impl<'de> de::Deserializer<'de> for Object<'de> {
     });
 
     fn is_human_readable(&self) -> bool {
+        //TODO: This should *probably* be a little smarter depending on the field keys available.
         true
     }
 
@@ -942,14 +948,15 @@ impl<'de, I: Iterator<Item = (Object<'de>, Object<'de>)>> de::MapAccess<'de> for
     }
 }
 
-impl<'de> de::EnumAccess<'de> for Object<'de> {
-    type Error = <Self as de::Deserializer<'de>>::Error;
+struct EnumAccess<'de>(Object<'de>);
+impl<'de> de::EnumAccess<'de> for EnumAccess<'de> {
+    type Error = <Object<'de> as de::Deserializer<'de>>::Error;
     type Variant = VariantAccess<'de>;
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
     where
         V: de::DeserializeSeed<'de>,
     {
-        match self {
+        match self.0 {
             Object::UnitVariant { variant, .. } => {
                 (seed.deserialize(*variant)?, VariantAccess::Unit)
             }
@@ -973,14 +980,14 @@ impl<'de> de::EnumAccess<'de> for Object<'de> {
     }
 }
 
-pub enum VariantAccess<'a> {
+enum VariantAccess<'a> {
     Unit,
     Newtype(Object<'a>),
     Tuple(Object<'a>),
     Struct(Object<'a>),
 }
 impl<'de> de::VariantAccess<'de> for VariantAccess<'de> {
-    type Error = <Object<'de> as de::EnumAccess<'de>>::Error;
+    type Error = <Object<'de> as de::Deserializer<'de>>::Error;
     fn unit_variant(self) -> Result<(), Self::Error> {
         match self {
             VariantAccess::Unit => Ok(()),

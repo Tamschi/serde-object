@@ -10,7 +10,10 @@ publish = false
 
 [dependencies]
 lazy_static = "1.4.0"
+linkme = { version = "0.2.2", optional = true }
 serde = "1.0.114"
-serde-object-assistant-extra = { path = "../serde-object-assistant-extra" }
 try_match = "0.2.2"
 wyz = "0.2.0"
+
+[features]
+assistant-extra = ["linkme"]
