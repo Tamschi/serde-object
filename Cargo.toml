@@ -1,12 +1,15 @@
-#TODO: Rename this to serde-object.
 [package]
 name = "serde-object"
 version = "0.0.0-dev"
 authors = ["Tamme Schichler <tamme@schichler.dev>"]
 edition = "2018"
+license = "MIT OR Apache-2.0"
+description = "Universal value type covering the entire Serde data model"
 publish = false
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+]
 
 [dependencies]
 lazy_static = "1.4.0"
