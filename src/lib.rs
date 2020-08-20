@@ -707,7 +707,7 @@ impl<'de, Assistant: EnumAssistant + Clone> de::Visitor<'de> for Visitor<Assista
         let extra_hint = assistant::extra::enum_variant_hint();
         #[cfg(not(feature = "assistant-extra"))]
         let extra_hint = None;
-        
+
         // Then, try a user-provided hint.
         match extra_hint.map_or_else(|| self.0.variant_hint(&variant), Ok)? {
             VariantKind::Unit => variant_access
